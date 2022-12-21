@@ -367,9 +367,10 @@ So far I have only covered pure binding classes. However, the Runtime should als
 NOTE: We should follow swifts contract, and don't allow overriding of structs.
 Implementing the first one should be easy, we just need a direct mapping from one object pointer to a java object. This way, we can always restore the same state for the same swift object.
 The second one is however tricky. How can we let the native side dispatch a method call to our java method?
-Basically, we need a custom metatdata or pwt, which we will attach to our custom object.
-For classes we can do that on runtime. Basically, we just need to get the metadata pointer from the parent binding class, clone that and patch a few fields.
-Besides the nominal type descriptor, creating the metadata at runtime is quite straight forward. I put a reversed engeneerd layout below, on what needs to be patched:
+Basically, we need a custom metatdata or pwt, which we will attach to our custom object. On that metadata/pwt we can patch the function pointer to libffi closures. It's basically the same procedure
+as how the jni methods are bridged, just the other way around.
+We can do that on runtime. Basically, we just need to get the metadata pointer from the parent binding class, clone that and patch a few fields. If we want to implement a protocol, we can create a dummy struct metadata pointer. We can't override structs, so no need to deal with that.
+Besides the nominal type descriptor, creating the metadata at runtime is quite straight forward. I put a reversed engeneerd layout for a class below, on what needs to be patched:
 ```asm
 _$s15InheritanceTest013DummyClassForA0CMf:
 	.quad	_$s15InheritanceTest013DummyClassForA0CfD // deinit
@@ -417,6 +418,15 @@ __DATA__TtC15InheritanceTest24DummyClassForInheritance:
 	.quad	0
 	.quad	0
 ```
+TODO: Nominal type
+The layout of a struct is also fairly simple:
+```asm
+_$s8EnumTest0B6StructVMf:
+	.quad	_$sytWV
+	.quad	512
+	.quad	_$s8EnumTest0B6StructVMn // Nominal type
+```
+TODO: Nominal type for structs too
 
 #### Memory Managment
 Since swift also uses ARC, the same way ObjC does, I will follow this nice article: https://www.noisyfox.io/natj-memory-management.html
