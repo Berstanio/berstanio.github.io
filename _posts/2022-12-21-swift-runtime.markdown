@@ -14,30 +14,30 @@ Before we go into swift, let’s cover a bit the general approach. The core elem
 The API is pretty straight forward, first we define a “ffi_cif”, that describes the layout and conventions of our function.
 This can be done with ```ffi_prep_cif (ffi_cif *cif, ffi_abi abi, unsigned int nargs, ffi_type *rtype, ffi_type **argtypes)```.
 After that we can dispatch a function call with a function pointer and that cif ```ffi_call (ffi_cif *cif, void *fn, void *rvalue, void **avalues)```
-Seems easy enough, doesn't it?
+Seems easy enough, doesn't it?  
 
 But how do we glue this now together with jni?
 Also that is fairly simple, we can use the libffi closure API. With that, we can generate a closure that will receive arbitrary arguments and can call a function itself again.
-So, we can do something like ```ffi_prep_closure_loc(closure, closureCif, javaToSwiftHandler, info, code);```, where javaToSwiftHandler is a function pointer to a function looking like this ```void javaToSwiftHandler(ffi_cif* cif, void* result, void** args, void* user)```.
+So, we can do something like ```ffi_prep_closure_loc(closure, closureCif, javaToSwiftHandler, info, code);```, where javaToSwiftHandler is a function pointer to a function looking like this ```void javaToSwiftHandler(ffi_cif* cif, void* result, void** args, void* user)```.  
 NOTE: With "info" we can transport information about the parameter and return type layout. "code" is the function pointer to our closure.
-The javaToSwiftHandler now needs to convert the java objects to native values and than calls "ffi_call" with the parameters and the targeted swift function (the function pointer will be passed in the "info" too).
+The javaToSwiftHandler now needs to convert the java objects to native values and than calls "ffi_call" with the parameters and the targeted swift function (the function pointer will be passed in the "info" too).  
 
-Now the closure just needs to be registered as native method, and all should work.
+Now the closure just needs to be registered as native method, and all should work.  
 
 
 #### How to get swift function pointer
-After I laid out the basic about the jni/native method dispatching, now lets find out how we get the swift function pointer.
-This is also straight forward, we need to know the symbol of the function and can than get the address with `dlsym`.
+After I laid out the basic about the jni/native method dispatching, now lets find out how we get the swift function pointer.  
+This is also straight forward, we need to know the symbol of the function and can than get the address with `dlsym`.  
 Let's start with global functions. Suppose we have
 ```swift
 public func testFunc() {
     print("Heeey")
 }
 ```
-We can combpile that to create a shared library with ```swiftc swiftTest.swift -emit-library -g```
-Than we can dump out all symbols with ```nm -g -C --defined-only libswiftTest.dylib```.
-We will fine one symbol `$s9swiftTest8testFuncyyF`. We can double check that symbol with `swift demangle s9swiftTest8testFuncyyF` (note, that the leading $ needs to be removed), and we will see `$s9swiftTest8testFuncyyF ---> swiftTest.testFunc() -> ()`.
-So we got the right symbol. And `dlsym(handle, "$s9swiftTest8testFuncyyF")` will give us the correct function pointer.
+We can combpile that to create a shared library with ```swiftc swiftTest.swift -emit-library -g```.  
+Than we can dump out all symbols with ```nm -g -C --defined-only libswiftTest.dylib```.  
+We will fine one symbol `$s9swiftTest8testFuncyyF`. We can double check that symbol with `swift demangle s9swiftTest8testFuncyyF` (note, that the leading $ needs to be removed), and we will see `$s9swiftTest8testFuncyyF ---> swiftTest.testFunc() -> ()`.  
+So we got the right symbol. And `dlsym(handle, "$s9swiftTest8testFuncyyF")` will give us the correct function pointer.  
 
 Some code that can be used for demonstration is:
 ``` c++
@@ -53,16 +53,16 @@ int main() {
     return 0;
 }
 ```
-For further testing around with libffi this example can be used and extended, but I wont come back to it.
+For further testing around with libffi this example can be used and extended, but I wont come back to it.  
 
-So, we can now dispatch global functions with arbitrary (non-struct) parameter and return types, yay!
+So, we can now dispatch global functions with arbitrary (non-struct) parameter and return types, yay!  
 
-We will save structs for later :D
+We will save structs for later :D  
 
 #### Classes
-So, now after having global function support we can feel invincible! Let's go further to object and object methods!
-Usually in object oriented programming, object functions are just global functions, that get their object to act on as the first implicit parameter.
-NOTE: We will cover constructors later, lets assume for now we have a global functions that creates the objects for us and returns them.
+So, now after having global function support we can feel invincible! Let's go further to object and object methods!  
+Usually in object oriented programming, object functions are just global functions, that get their object to act on as the first implicit parameter.  
+NOTE: We will cover constructors later, lets assume for now we have a global functions that creates the objects for us and returns them.  
 
 So in theory, both method should be able to get identical called:
 ```swift
@@ -82,9 +82,9 @@ public func printFieldGlobal(_ par: TestClass) {
     print("Field: \(par.field)")
 }
 ```
-However, we will see that we get a segfault when trying to execute the object method, but the global method works fine. How can this be?
-Let's look at the assembly, whether we find something.
-We can get it with `swiftc -S switTest.swift > assembly.asm`
+However, we will see that we get a segfault when trying to execute the object method, but the global method works fine. How can this be?  
+Let's look at the assembly, whether we find something.  
+We can get it with `swiftc -S switTest.swift > assembly.asm`  
 
 We will find the following arm64 assembly (simplified) for the object method:
 ```asm
@@ -110,9 +110,9 @@ _$s9swiftTest16printFieldGlobalyyAA0B5ClassCF:
 	ret
 ```
 
-Spot the difference? The global functions expects the object pointer in the x0 register (which is usual) and the object method in the x20 register.
-A quick look at the docs confirms this: https://github.com/apple/swift/blob/main/docs/ABI/CallConvSummary.rst
-The implicit object pointer is expected to be in x20. To fix this I applied a hack to libffi, that the first parameter gets put into the x20 register, if a specific flag is set. 
+Spot the difference? The global functions expects the object pointer in the x0 register (which is usual) and the object method in the x20 register.  
+A quick look at the docs confirms this: https://github.com/apple/swift/blob/main/docs/ABI/CallConvSummary.rst  
+The implicit object pointer is expected to be in x20. To fix this I applied a hack to libffi, that the first parameter gets put into the x20 register, if a specific flag is set.  
 The patch would be the following, please forgive the ugliness, I don't really know assembly:
 ```diff
 diff --git a/src/aarch64/ffi.c b/src/aarch64/ffi.c
@@ -170,7 +170,7 @@ diff --git a/src/aarch64/sysv.S b/src/aarch64/sysv.S
  	add	sp, sp, #CALL_CONTEXT_SIZE
 ```
 
-With this patch object function dispatch works fine!
+With this patch object function dispatch works fine!  
 With that we also have field support, because looking at the symbols you'll find:
 ```
 $s9swiftTest0B5ClassC5fieldSivs ---> swiftTest.TestClass.field.setter : Swift.Int
@@ -180,9 +180,9 @@ $s9swiftTest0B5ClassC5fieldSivM ---> swiftTest.TestClass.field.modify : Swift.In
 Getter and setter are obious and can be dispatched as normal object functions. And I have no idea what modify is :/
 
 #### Constructor
-The constructor is also just a static function:
-`$s9swiftTest0B5ClassCACycfC ---> swiftTest.TestClass.__allocating_init() -> swiftTest.TestClass`
-NOTE: Don't confuse it with the symbol with the lower case `c` symbol at the end, this is just for initing, not allocation.
+The constructor is also just a static function:  
+`$s9swiftTest0B5ClassCACycfC ---> swiftTest.TestClass.__allocating_init() -> swiftTest.TestClass`  
+NOTE: Don't confuse it with the symbol with the lower case `c` symbol at the end, this is just for initing, not allocation.  
 However, there is another trick to it, that is hidden. Looking at the llvm bitcode `swiftc -emit-bc swiftTest.swift` we will find:
 ```
 define swiftcc %T9swiftTest0B5ClassC* @"$s9swiftTest0B5ClassCACycfC"(%swift.type* swiftself %0) #0 {
@@ -192,8 +192,8 @@ define swiftcc %T9swiftTest0B5ClassC* @"$s9swiftTest0B5ClassCACycfC"(%swift.type
   ret %T9swiftTest0B5ClassC* %4
 }
 ```
-Yep, a hidden parameter, that is also passed in the x20 register (see swiftself).
-What we need to pass is the metadata type of the class. But we can easily get it with the `$s9swiftTest0B5ClassCMa ---> type metadata accessor for swiftTest.TestClass` function, so no big hassle.
+Yep, a hidden parameter, that is also passed in the x20 register (see swiftself).  
+What we need to pass is the metadata type of the class. But we can easily get it with the `$s9swiftTest0B5ClassCMa ---> type metadata accessor for swiftTest.TestClass` function, so no big hassle.  
 
 #### Inheritance
 So, now we want to fully support inheritance. Imagine this code:
@@ -233,16 +233,16 @@ public class SubClass : BaseClass {
     }
 }
 ```
-Suppose we only have bindings for the `TestClass` class, but we got a `SubClass` somewhere as return. How can we dispatch the overriden function correctly, without knowing the symbol we want to call at build time.
-To achieve this, swift uses virtual dispatch.
-Rough explanation about it:
-In virtual dispatch every object gets a table at creating time, where pointer to every function the object has, are stored.
-So, for every object of BaseClass and it ascendents (SubClass e.g.), the object stores a address to the function that should be called at the same offset. So by knowing the offset at compile time, you can get the correct function at runtime.
-I won't go deeper into the tables, there are way better resources already existing.
+Suppose we only have bindings for the `TestClass` class, but we got a `SubClass` somewhere as return. How can we dispatch the overriden function correctly, without knowing the symbol we want to call at build time.  
+To achieve this, swift uses virtual dispatch.  
+Rough explanation about it:  
+In virtual dispatch every object gets a table at creating time, where pointer to every function the object has, are stored.  
+So, for every object of BaseClass and it ascendents (SubClass e.g.), the object stores a address to the function that should be called at the same offset. So by knowing the offset at compile time, you can get the correct function at runtime.  
+I won't go deeper into the tables, there are way better resources already existing.  
 
-So, where exactly is the vtable stored in swift?
-If you dereference the object pointer, you will get a metadata pointer (remember, the one we needed for creating the object in the first place with a constructor). The metadata is class specific.
-In assembly it will look like this:
+So, where exactly is the vtable stored in swift?  
+If you dereference the object pointer, you will get a metadata pointer (remember, the one we needed for creating the object in the first place with a constructor). The metadata is class specific.  
+In assembly it will look like this:  
 BaseClass:
 ```asm
 _$s9swiftTest9BaseClassCMf:
@@ -290,86 +290,86 @@ _$s9swiftTest8SubClassCMf:
 	.quad	_$s9swiftTest8SubClassCACycfC
 	.quad	_$s9swiftTest8SubClassC04onlycD0SiyF
 ```
-As you can see, the function pointer are ordered after definiton order, from BaseClass -> SubClass.
-So by offsetting the metadata pointer by e.g. 88, we get the object dependend function pointer to the overriden method, without knowing, that the class was overriden in the first place.
-This is the whole magic for inheritance.
+As you can see, the function pointer are ordered after definiton order, from BaseClass -> SubClass.  
+So by offsetting the metadata pointer by e.g. 88, we get the object dependend function pointer to the overriden method, without knowing, that the class was overriden in the first place.  
+This is the whole magic for inheritance.  
 
 #### Structs
-For now there isn't to much to cover here, structs have the same layout as c structs.
-The main differences afaik are, structs can't extend each other and structs can have functions.
-The first one makes our live easy, the second one is just a bit annoying.
-Basically, swift struct functions pass the implicit struct as the last parameter, not the first one. 
-For structs until a size of 32 byte, the values are individually passed in the standard registers.
-For larger structs, a pointer to the struct needs to be passed. This pointer needs to be passed in the self register, so on arm64 x20.
-Structs also have a constructor, the same way a class has. However, they are weird, I don't understand them.
-*In theory* for structs <= 32, the constructor returns the created struct. For larger structs, you need to pass a pre-allocated struct pointer that than gets inited. 
-TODO: Find out how structs 24/32 size are handled.
-However, on my test this is weird, not sure why yet. 
-And structs get reaaally annoying with protocols, but more on that later.
+For now there isn't to much to cover here, structs have the same layout as c structs.  
+The main differences afaik are, structs can't extend each other and structs can have functions.  
+The first one makes our live easy, the second one is just a bit annoying.  
+Basically, swift struct functions pass the implicit struct as the last parameter, not the first one.   
+For structs until a size of 32 byte, the values are individually passed in the standard registers.  
+For larger structs, a pointer to the struct needs to be passed. This pointer needs to be passed in the self register, so on arm64 x20.  
+Structs also have a constructor, the same way a class has. However, they are weird, I don't understand them.  
+*In theory* for structs <= 32, the constructor returns the created struct. For larger structs, you need to pass a pre-allocated struct pointer that than gets inited.  
+TODO: Find out how structs 24/32 size are handled.  
+However, on my test this is weird, not sure why yet.  
+And structs get reaaally annoying with protocols, but more on that later.  
 
 #### Small excurs, how to find the best binding 
-Suppose function A declares a return of type B, but it actually returns C, what we have a binding for.
-Since every object has a metadata type pointer, we can just use a table, mapping metadata pointer to binding classes.
-And struct don't have inheritance, so we know we already have the highest binding.
-For classes we can find the highest possible binding, since we can traverse the metadata type hierachy. 
-At the +8 offset on the metadata is a pointer to the metadata of the super class.
+Suppose function A declares a return of type B, but it actually returns C, what we have a binding for.  
+Since every object has a metadata type pointer, we can just use a table, mapping metadata pointer to binding classes.  
+And struct don't have inheritance, so we know we already have the highest binding.  
+For classes we can find the highest possible binding, since we can traverse the metadata type hierachy.  
+At the +8 offset on the metadata is a pointer to the metadata of the super class.  
 
 #### Protocol
-So, now about protocols. Protocols are like interfaces in swift, to which classes **and structs** can conform to.
-What makes protocols complicated to deal with is, the fact, that also structs can conform to that.
-E.g. we want a array of protocol types. structs don't have a consistent size, unlike objects. So having a array of possibly different sized structs + objects is not possible.
-So, how does swift solves this? They put it into a "existential container".  This is basically a fixed size container for the structs and classes.
-The layout is the following:
+So, now about protocols. Protocols are like interfaces in swift, to which classes **and structs** can conform to.  
+What makes protocols complicated to deal with is, the fact, that also structs can conform to that.  
+E.g. we want a array of protocol types. structs don't have a consistent size, unlike objects. So having a array of possibly different sized structs + objects is not possible.  
+So, how does swift solves this? They put it into a "existential container".  This is basically a fixed size container for the structs and classes.  
+The layout is the following:  
 
-3 x word-sized values
-metadata pointer
-protocol witness table pointer
+3 x word-sized values  
+metadata pointer  
+protocol witness table pointer  
 
-The three values store either the object pointer (for classes), the whole struct if it fits or a pointer to a heap allocated struct.
-The pointer to the heap allocated struct seems to be weird, since the actual struct just starts at a offset of 16. It's up to investigation, why. 
-// https://developer.apple.com/videos/play/wwdc2016/416/?time=1472 38:13 maybe?
-The metadata pointer points to the metadata.
-And the pwt stores pointer to functions, similiar to the vtable of classes.
+The three values store either the object pointer (for classes), the whole struct if it fits or a pointer to a heap allocated struct.  
+The pointer to the heap allocated struct seems to be weird, since the actual struct just starts at a offset of 16. It's up to investigation, why.  
+// https://developer.apple.com/videos/play/wwdc2016/416/?time=1472 38:13 maybe?  
+The metadata pointer points to the metadata.  
+And the pwt stores pointer to functions, similiar to the vtable of classes.  
 
 So, this is difficult. How do we wanna deal with it, when we get a protocol type returned?
 We need to differenciate:
-1. We have a struct/class and we have bindings for that (we can know that over the metadata pointer)
-    Than we can just unbox the EC (existential container) and we have a struct/class binding downcasted to a interface in java.
-	For structs we know the layout of the EC, because we know the size of it. Important to consider for structs is probably also the management. 
-	So we will *probably* need to make a copy of the struct in every case
+1. We have a struct/class and we have bindings for that (we can know that over the metadata pointer)  
+    Than we can just unbox the EC (existential container) and we have a struct/class binding downcasted to a interface in java.  
+	For structs we know the layout of the EC, because we know the size of it. Important to consider for structs is probably also the management.   
+	So we will *probably* need to make a copy of the struct in every case.  
     Method dispatching will work perfectly with static/virtual dispatch for structs/classes.
-2. We have a struct/class and we don't have bindings
-    Than we need to create a proxy for that protocol java interface, and dispatch methods with the pwt.
-	Also here is the lifetime of the EC important, it may be that it needs to be cloned too.
-	However, for classes it is good enough if we find the first conforming class in the inheritance hirachy. And after that, we can easily use virtual dispatch.
+2. We have a struct/class and we don't have bindings  
+    Than we need to create a proxy for that protocol java interface, and dispatch methods with the pwt.  
+	Also here is the lifetime of the EC important, it may be that it needs to be cloned too.  
+	However, for classes it is good enough if we find the first conforming class in the inheritance hirachy. And after that, we can easily use virtual dispatch.  
 
 What is, when we want to call a function with a protocol parameter:
-1. We have bindings for what we want to pass, so we need to box them in a EC ourselve. 
+1. We have bindings for what we want to pass, so we need to box them in a EC ourselve.  
     How to properly box it, will be explained later.
-2. We pass a already boxed proxy back, so we just need to pass it back.
+2. We pass a already boxed proxy back, so we just need to pass it back.  
 NOTE: Important is here also, that the EC is passed by value, not by reference.
 
 What is also complicated is the fact, that a function can expect a parameter, that conforms to protocol A and B. In java we sadly don't have a clean way to represent this.
 
 #### How to box a java binding in a EC
-While I first thought this would be easy, it was suprisingly complicated.
-So what we need is: The metadata pointer and the protocol witness table.
-The metadata pointer is easy to obtain, for classes we can just dereference the class pointer. For structs we need to create a mapping on startup for class -> metadatapointer.
-The witness table was complicated:
-The swift runtimes has a method called "swift_conformsToProtocol", which retrieves a metadata pointer and a protocol descriptor pointer and returns the pointer to the witness table.
-Every protocol has it's own descriptor, and we can know the symbol of it at compile time. So we just need to resolve the symbol at runtime.
-Know we have everything we need and create the EC. It seems to be just a unaligned array of word sized values, so easy enough to create.
-Important to consider is also, the earlier mentioned struct offset of 16 for heap allocated structs.
+While I first thought this would be easy, it was suprisingly complicated.  
+So what we need is: The metadata pointer and the protocol witness table.  
+The metadata pointer is easy to obtain, for classes we can just dereference the class pointer. For structs we need to create a mapping on startup for class -> metadatapointer.  
+The witness table was complicated:  
+The swift runtimes has a method called "swift_conformsToProtocol", which retrieves a metadata pointer and a protocol descriptor pointer and returns the pointer to the witness table.  
+Every protocol has it's own descriptor, and we can know the symbol of it at compile time. So we just need to resolve the symbol at runtime.  
+Know we have everything we need and create the EC. It seems to be just a unaligned array of word sized values, so easy enough to create.  
+Important to consider is also, the earlier mentioned struct offset of 16 for heap allocated structs.  
 
 
 #### Implementing java side native objects
-So far I have only covered pure binding classes. However, the Runtime should also provide capabilities to store states on the java side and should be able to override methods.
-NOTE: We should follow swifts contract, and don't allow overriding of structs.
-Implementing the first one should be easy, we just need a direct mapping from one object pointer to a java object. This way, we can always restore the same state for the same swift object.
-The second one is however tricky. How can we let the native side dispatch a method call to our java method?
+So far I have only covered pure binding classes. However, the Runtime should also provide capabilities to store states on the java side and should be able to override methods.  
+NOTE: We should follow swifts contract, and don't allow overriding of structs.  
+Implementing the first one should be easy, we just need a direct mapping from one object pointer to a java object. This way, we can always restore the same state for the same swift object.  
+The second one is however tricky. How can we let the native side dispatch a method call to our java method?  
 Basically, we need a custom metatdata or pwt, which we will attach to our custom object. On that metadata/pwt we can patch the function pointer to libffi closures. It's basically the same procedure
-as how the jni methods are bridged, just the other way around.
-We can do that on runtime. Basically, we just need to get the metadata pointer from the parent binding class, clone that and patch a few fields. If we want to implement a protocol, we can create a dummy struct metadata pointer. We can't override structs, so no need to deal with that.
+as how the jni methods are bridged, just the other way around.  
+We can do that on runtime. Basically, we just need to get the metadata pointer from the parent binding class, clone that and patch a few fields. If we want to implement a protocol, we can create a dummy struct metadata pointer. We can't override structs, so no need to deal with that.  
 Besides the nominal type descriptor, creating the metadata at runtime is quite straight forward. I put a reversed engeneerd layout for a class below, on what needs to be patched:
 ```asm
 _$s15InheritanceTest013DummyClassForA0CMf:
@@ -418,7 +418,7 @@ __DATA__TtC15InheritanceTest24DummyClassForInheritance:
 	.quad	0
 	.quad	0
 ```
-TODO: Nominal type
+TODO: Nominal type  
 The layout of a struct is also fairly simple:
 ```asm
 _$s8EnumTest0B6StructVMf:
@@ -429,7 +429,7 @@ _$s8EnumTest0B6StructVMf:
 TODO: Nominal type for structs too
 
 #### Memory Managment
-Since swift also uses ARC, the same way ObjC does, I will follow this nice article: https://www.noisyfox.io/natj-memory-management.html
+Since swift also uses ARC, the same way ObjC does, I will follow this nice article: https://www.noisyfox.io/natj-memory-management.html 
 https://clang.llvm.org/docs/AutomaticReferenceCounting.html
-HOWEVER, Swift seems to not support hooking in on release calls, which is veeery unfortunate. Soo, I guess we need to implement something like a little GC ourselves for inherited objects?
-Since we have a object* -> java object map, we can just scan through the map, check whether a object* has a ref count of 1, and if yes put it into a weak ref map. But thats probably a heavy operation :/
+HOWEVER, Swift seems to not support hooking in on release calls, which is veeery unfortunate. Soo, I guess we need to implement something like a little GC ourselves for inherited objects?  
+Since we have a object* -> java object map, we can just scan through the map, check whether a object* has a ref count of 1, and if yes put it into a weak ref map. But thats probably a heavy operation :/  
