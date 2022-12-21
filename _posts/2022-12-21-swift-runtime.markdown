@@ -34,7 +34,7 @@ public func testFunc() {
     print("Heeey")
 }
 ```
-We can combpile that to create a shared library with ```swiftc swiftTest.swift -emit-library -g```.  
+We can compile that to create a shared library with ```swiftc swiftTest.swift -emit-library -g```.  
 Than we can dump out all symbols with ```nm -g -C --defined-only libswiftTest.dylib```.  
 We will fine one symbol `$s9swiftTest8testFuncyyF`. We can double check that symbol with `swift demangle s9swiftTest8testFuncyyF` (note, that the leading $ needs to be removed), and we will see `$s9swiftTest8testFuncyyF ---> swiftTest.testFunc() -> ()`.  
 So we got the right symbol. And `dlsym(handle, "$s9swiftTest8testFuncyyF")` will give us the correct function pointer.  
@@ -55,12 +55,18 @@ int main() {
 ```
 For further testing around with libffi this example can be used and extended, but I wont come back to it.  
 
-So, we can now dispatch global functions with arbitrary (non-struct) parameter and return types, yay!  
+So, we can now dispatch global functions with arbitrary parameter and return types, yay!  
+Structs until a size of 32 are passed by value, anything larger will be passed by a struct pointer (but the struct itself will still be cloned).  
 
-We will save structs for later :D  
+Having global function support, lets move on to object functions.
 
-#### Classes
-So, now after having global function support we can feel invincible! Let's go further to object and object methods!  
+#### What are objects in swift
+Objects in swift are defined by a object pointer. The object pointer points to the information/data of the object
+
+#### What are structs in swift
+Structs in swift are similiar to c structs. They are passed by value, don't support inheritance and can have "object" functions.
+
+#### Object methods
 Usually in object oriented programming, object functions are just global functions, that get their object to act on as the first implicit parameter.  
 NOTE: We will cover constructors later, lets assume for now we have a global functions that creates the objects for us and returns them.  
 
@@ -171,15 +177,23 @@ diff --git a/src/aarch64/sysv.S b/src/aarch64/sysv.S
 ```
 
 With this patch object function dispatch works fine!  
+
+However, structs object functions are a bit more difficult. If a struct is smaller than 32, the struct is passed by value as the *last* function argument, not the first.
+If the struct is larger or equal to 32, it is passed as a pointer to the struct, but in the x20 register (as swiftself). The struct should be still cloned and therefor indirectly passed by value.
+
 With that we also have field support, because looking at the symbols you'll find:
 ```
 $s9swiftTest0B5ClassC5fieldSivs ---> swiftTest.TestClass.field.setter : Swift.Int
 $s9swiftTest0B5ClassC5fieldSivg ---> swiftTest.TestClass.field.getter : Swift.Int
 $s9swiftTest0B5ClassC5fieldSivM ---> swiftTest.TestClass.field.modify : Swift.Int
 ```
-Getter and setter are obious and can be dispatched as normal object functions. And I have no idea what modify is :/
+Getter and setter are obvious and can be dispatched as normal object functions. And I have no idea what modify is :/  
+
+Now we can move on to, how we can even create/init objects/structs.  
 
 #### Constructor
+
+##### Constructor for objects
 The constructor is also just a static function:  
 `$s9swiftTest0B5ClassCACycfC ---> swiftTest.TestClass.__allocating_init() -> swiftTest.TestClass`  
 NOTE: Don't confuse it with the symbol with the lower case `c` symbol at the end, this is just for initing, not allocation.  
@@ -195,8 +209,14 @@ define swiftcc %T9swiftTest0B5ClassC* @"$s9swiftTest0B5ClassCACycfC"(%swift.type
 Yep, a hidden parameter, that is also passed in the x20 register (see swiftself).  
 What we need to pass is the metadata type of the class. But we can easily get it with the `$s9swiftTest0B5ClassCMa ---> type metadata accessor for swiftTest.TestClass` function, so no big hassle.  
 
+##### Constructor for structs
+There are two types of struct constructors. If the struct is smaller than 32, the struct is just returned by the constructor (NOTE: Structs only have a init constructor `$s9swiftTest0B6StructVACycfC ---> swiftTest.TestStruct.init() -> swiftTest.TestStruct`)
+If the struct is larger or equals than 32, than we need to pass a pre allocated struct pointer to the constructor as first parameter (normal register, not x20).
+TODO: Is this even true? And how does 24/32 works?
+
 #### Inheritance
-So, now we want to fully support inheritance. Imagine this code:
+Now that we can create objects of classes, how can we support inheritance?  
+Imagine this code:
 ```swift
 public class TestClass {    
     public func printName() {
@@ -294,20 +314,9 @@ As you can see, the function pointer are ordered after definiton order, from Bas
 So by offsetting the metadata pointer by e.g. 88, we get the object dependend function pointer to the overriden method, without knowing, that the class was overriden in the first place.  
 This is the whole magic for inheritance.  
 
-#### Structs
-For now there isn't to much to cover here, structs have the same layout as c structs.  
-The main differences afaik are, structs can't extend each other and structs can have functions.  
-The first one makes our live easy, the second one is just a bit annoying.  
-Basically, swift struct functions pass the implicit struct as the last parameter, not the first one.   
-For structs until a size of 32 byte, the values are individually passed in the standard registers.  
-For larger structs, a pointer to the struct needs to be passed. This pointer needs to be passed in the self register, so on arm64 x20.  
-Structs also have a constructor, the same way a class has. However, they are weird, I don't understand them.  
-*In theory* for structs <= 32, the constructor returns the created struct. For larger structs, you need to pass a pre-allocated struct pointer that than gets inited.  
-TODO: Find out how structs 24/32 size are handled.  
-However, on my test this is weird, not sure why yet.  
-And structs get reaaally annoying with protocols, but more on that later.  
+But the questions is now, how can we find the best fitting java binding for swift object.
 
-#### Small excurs, how to find the best binding 
+#### How to find the best binding 
 Suppose function A declares a return of type B, but it actually returns C, what we have a binding for.  
 Since every object has a metadata type pointer, we can just use a table, mapping metadata pointer to binding classes.  
 And struct don't have inheritance, so we know we already have the highest binding.  
@@ -339,7 +348,7 @@ We need to differenciate:
 	So we will *probably* need to make a copy of the struct in every case.  
     Method dispatching will work perfectly with static/virtual dispatch for structs/classes.
 2. We have a struct/class and we don't have bindings  
-    Than we need to create a proxy for that protocol java interface, and dispatch methods with the pwt.  
+    Than we need to create a proxy for that protocol java interface, and dispatch methods with the pwt. The pwt offset for the protocol is also known at compile time and is than just simple virtual dispatch.  
 	Also here is the lifetime of the EC important, it may be that it needs to be cloned too.  
 	However, for classes it is good enough if we find the first conforming class in the inheritance hirachy. And after that, we can easily use virtual dispatch.  
 
@@ -360,6 +369,11 @@ The swift runtimes has a method called "swift_conformsToProtocol", which retriev
 Every protocol has it's own descriptor, and we can know the symbol of it at compile time. So we just need to resolve the symbol at runtime.  
 Know we have everything we need and create the EC. It seems to be just a unaligned array of word sized values, so easy enough to create.  
 Important to consider is also, the earlier mentioned struct offset of 16 for heap allocated structs.  
+
+#### Enums
+
+
+#### Error Handling
 
 
 #### Implementing java side native objects
